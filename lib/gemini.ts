@@ -54,7 +54,7 @@ export async function generateImage(
 
 
 
-    const parts = [{ text: enhancedPrompt }];
+    const parts: Part[] = [{ text: enhancedPrompt }];
     // Append image parts if any
     if (imageParts.length > 0) {
         parts.push(...imageParts);
