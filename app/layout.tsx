@@ -8,6 +8,9 @@ const inter = Inter({ subsets: ["latin"] });
 export const metadata: Metadata = {
     title: "AI Manga Generator",
     description: "Generate manga with Gemini API",
+    icons: {
+        icon: "/icon.png",
+    },
 };
 
 export default function RootLayout({
