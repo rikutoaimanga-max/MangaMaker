@@ -1,3 +1,8 @@
 {
-    "framework": "nextjs"
+  "rewrites": [
+    {
+      "source": "/chara/:path*",
+      "destination": "https://rikuto-oricharamaker.jp/:path*"
+    }
+  ]
 }
