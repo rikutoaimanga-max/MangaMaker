@@ -4,27 +4,46 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Sparkles, Image as ImageIcon, Plus, BookOpen, Layers, Paintbrush, Loader2, X, Download, Maximize2 } from 'lucide-react';
 import { getAllImages, getImage } from '@/lib/db';
-import { generateMangaPrompts, generatePromptsFromScript, generateImage } from '@/lib/gemini';
+// Removed client-side gemini imports
+// import { generateMangaPrompts, generatePromptsFromScript, generateImage } from '@/lib/gemini';
+import { generateImageAction, generateMangaPromptsAction, GeminiConfig } from '@/app/actions/gemini';
 import { generateImageFal } from '@/lib/fal';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 
+// Helper for Blob to Base64
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const base64String = reader.result as string;
+      // Remove data URL prefix (e.g. "data:image/jpeg;base64,")
+      resolve(base64String.split(',')[1]);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
 export default function Workspace() {
   const router = useRouter();
-  const [apiKey, setApiKey] = useState('');
+
+  // Settings State
+  const [geminiConfig, setGeminiConfig] = useState<GeminiConfig>({ provider: 'google' });
   const [falApiKey, setFalApiKey] = useState('');
+
   const [prompt, setPrompt] = useState('');
   const [pageCount, setPageCount] = useState(1);
   const [aspectRatio, setAspectRatio] = useState('2:3');
   const [outputFormat, setOutputFormat] = useState('png');
 
   const [provider, setProvider] = useState<'gemini' | 'fal'>('gemini');
-  const [inputMode, setInputMode] = useState<'idea' | 'script'>('idea'); // New state
+  const [inputMode, setInputMode] = useState<'idea' | 'script'>('idea');
   const [selectedImageIds, setSelectedImageIds] = useState<string[]>([]);
   const [availableImages, setAvailableImages] = useState<{ id: string; url: string; name: string }[]>([]);
-  // const [availableCharacters, setAvailableCharacters] = useState<Character[]>([]); // Removed
+
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedImages, setGeneratedImages] = useState<string[]>([]);
   const [statusMessage, setStatusMessage] = useState('');
@@ -53,15 +72,34 @@ export default function Workspace() {
 
   // Initial Data Load
   useEffect(() => {
-    const key = localStorage.getItem('gemini_api_key');
-    if (key) setApiKey(key);
+    // Load Gemini / Vertex Config
+    const storedProvider = localStorage.getItem('gemini_provider') as 'google' | 'vertex' || 'google';
+    const apiKey = localStorage.getItem('gemini_api_key') || '';
+    const projectId = localStorage.getItem('vertex_project_id') || '';
+    const location = localStorage.getItem('vertex_location') || 'us-central1';
+
+    setGeminiConfig({
+      provider: storedProvider,
+      apiKey,
+      projectId,
+      location
+    });
 
     const falKey = localStorage.getItem('fal_api_key');
     if (falKey) setFalApiKey(falKey);
 
-    if (!key && !falKey) {
-      router.push('/settings');
-      return;
+    // Basic check for required keys based on provider (loose check)
+    if (!apiKey && storedProvider === 'google' && !falKey) {
+      // Just a hint, don't force redirect immediately as they might strictly use fal or vertex
+    }
+
+    // Redirect logic: if no API keys at all are found that might make the app usable
+    // If google provider selected but no key, AND no fal key, maybe redirect.
+    // But now we have Vertex too. Let's start lenient.
+    // If absolutely no config related to the current provider is found, warn or redirect.
+    if (!apiKey && !projectId && !falKey) {
+      // Only redirect if truly empty to avoid annoying user
+      // router.push('/settings'); 
     }
 
     const loadImages = async () => {
@@ -73,12 +111,8 @@ export default function Workspace() {
       })).reverse();
       setAvailableImages(urls);
     };
-    // const loadCharacters = async () => {
-    //   const chars = await getAllCharacters();
-    //   setAvailableCharacters(chars.reverse());
-    // };
+
     loadImages();
-    // loadCharacters();
 
     // Clean up URLs
     return () => availableImages.forEach(img => URL.revokeObjectURL(img.url));
@@ -93,11 +127,18 @@ export default function Workspace() {
   const handleGenerate = async () => {
     if (!prompt.trim()) return;
 
-    // Check keys
-    if (provider === 'gemini' && !apiKey) {
-      setError('Gemini API Keyが設定されていません');
-      return;
+    // Check keys based on current provider selection and config
+    if (provider === 'gemini') {
+      if (geminiConfig.provider === 'google' && !geminiConfig.apiKey) {
+        setError('Gemini API Keyが設定されていません (Google AI Studio)');
+        return;
+      }
+      if (geminiConfig.provider === 'vertex' && (!geminiConfig.projectId || !geminiConfig.location)) {
+        setError('Vertex AIの設定（Project ID, Location）が不足しています');
+        return;
+      }
     }
+
     if (provider === 'fal' && !falApiKey) {
       setError('Fal.ai API Keyが設定されていません');
       return;
@@ -116,21 +157,36 @@ export default function Workspace() {
           return record ? { data: record.data, type: record.type } : null;
         })
       );
-      const validImages = selectedBlobs.filter(item => item !== null) as { data: Blob; type: string }[];
 
-      // 1. Generate Prompts for each page (Always use Gemini for this as it's text/multimodal logic)
-      if (!apiKey) {
-        throw new Error("プロンプト生成にはGemini API Keyが必要です。設定画面でGemini API Keyを設定してください。");
+      // Convert Blobs to Base64 for Server Action Transfer
+      const validImages = await Promise.all(
+        (selectedBlobs.filter(item => item !== null) as { data: Blob; type: string }[])
+          .map(async (img) => ({
+            base64: await blobToBase64(img.data),
+            type: img.type
+          }))
+      );
+
+      // 1. Generate Prompts for each page (Always use Gemini logic for text generation)
+      // Even if provider is 'fal' used for image, we probably use Gemini for prompt generation logic?
+      // The original code used `generateMangaPrompts` (Gemini) regardless of image provider?
+      // Yes, "Idea Mode: Use original logic prompts = await generateMangaPrompts...".
+      // But wait, the original code checked `if (!apiKey)` inside handleGenerate for Gemini prompt generation.
+      // We should use whatever Gemini config is available (Google or Vertex).
+
+      if (!geminiConfig.apiKey && geminiConfig.provider === 'google' && !geminiConfig.projectId) {
+        throw new Error("プロンプト生成にはGemini/Vertex AIの設定が必要です。");
       }
 
       let prompts: string[] = [];
-      if (inputMode === 'script') {
-        // Script Mode: Use the new strict script splitting logic
-        prompts = await generatePromptsFromScript(apiKey, prompt, pageCount);
-      } else {
-        // Idea Mode: Use original logic
-        prompts = await generateMangaPrompts(apiKey, prompt, pageCount, validImages);
-      }
+      // Call Server Action
+      prompts = await generateMangaPromptsAction(
+        geminiConfig,
+        prompt,
+        pageCount,
+        validImages,
+        inputMode === 'script'
+      );
 
       setStatusMessage('漫画を描いています...');
 
@@ -141,7 +197,7 @@ export default function Workspace() {
 
         let imagePrompt = prompts[i];
 
-        // Setup strict consistency for non-multimodal providers
+        // Setup strict consistency for non-multimodal providers or FAL
         if (validImages.length > 0) {
           imagePrompt += `\n\n[System Instruction]: Use the attached images as strict character references. Maintain character consistency throughout the page.`;
         }
@@ -150,12 +206,13 @@ export default function Workspace() {
         if (provider === 'fal') {
           base64Image = await generateImageFal(falApiKey, imagePrompt, { aspectRatio });
         } else {
-          base64Image = await generateImage(apiKey, imagePrompt, validImages, { aspectRatio });
+          // Use Server Action for Gemini/Vertex Image Gen
+          base64Image = await generateImageAction(geminiConfig, imagePrompt, validImages, { aspectRatio });
         }
 
         const imageUrl = `data:image/png;base64,${base64Image}`;
         newImages.push(imageUrl);
-        setGeneratedImages([...newImages]);
+        setGeneratedImages([...newImages]); // Progressive update
       }
 
     } catch (err) {

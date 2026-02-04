@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@google-cloud/aiplatform": "^6.2.0",
+    "@google-cloud/vertexai": "^1.10.0",
     "@google/generative-ai": "^0.24.1",
     "@types/file-saver": "^2.0.7",
     "clsx": "^2.1.1",
