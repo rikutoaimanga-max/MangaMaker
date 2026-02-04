@@ -106,10 +106,26 @@ export async function generateImageAction(
             throw new Error("Project ID and Location are required for Vertex AI provider.");
         }
 
-        const vertexAI = new VertexAI({
+        // Initialize with optional credentials from Env (for Vercel)
+        const vertexOptions: any = {
             project: config.projectId,
             location: config.location,
-        });
+        };
+
+        // Try to load credentials from Env Var (Vercel standard approach)
+        // Variable name: GOOGLE_VERTEX_CREDENTIALS (should be the JSON content stringified)
+        const envCredentials = process.env.GOOGLE_VERTEX_CREDENTIALS;
+        if (envCredentials) {
+            try {
+                const credentials = JSON.parse(envCredentials);
+                vertexOptions.googleAuthOptions = { credentials };
+            } catch (e) {
+                console.error("Failed to parse GOOGLE_VERTEX_CREDENTIALS", e);
+                // Fallback to ADC
+            }
+        }
+
+        const vertexAI = new VertexAI(vertexOptions);
 
         // Use the same model name or the Vertex equivalent (often 'imagegeneration@006' or similar for Imagen, 
         // but for Gemini 3 preview it might be 'gemini-3-pro-preview' etc if available on Vertex).
@@ -255,10 +271,23 @@ export async function generateMangaPromptsAction(
     if (config.provider === 'vertex') {
         if (!config.projectId || !config.location) throw new Error("Project ID and Location required for Vertex AI.");
 
-        const vertexAI = new VertexAI({
+        // Initialize with optional credentials from Env (for Vercel)
+        const vertexOptions: any = {
             project: config.projectId,
             location: config.location,
-        });
+        };
+
+        const envCredentials = process.env.GOOGLE_VERTEX_CREDENTIALS;
+        if (envCredentials) {
+            try {
+                const credentials = JSON.parse(envCredentials);
+                vertexOptions.googleAuthOptions = { credentials };
+            } catch (e) {
+                console.error("Failed to parse GOOGLE_VERTEX_CREDENTIALS", e);
+            }
+        }
+
+        const vertexAI = new VertexAI(vertexOptions);
         const model = vertexAI.getGenerativeModel({ model: modelName });
 
         const parts: VertexPart[] = [
